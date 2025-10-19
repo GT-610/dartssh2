@@ -138,7 +138,8 @@ class SftpClient {
     if (extVersion != null) {
       try {
         await _checkExtension('posix-rename@openssh.com', '1');
-        final payload = SftpPosixRenameRequest(oldPath: oldPath, newPath: newPath);
+        final payload =
+            SftpPosixRenameRequest(oldPath: oldPath, newPath: newPath);
         final reply = await _sendExtended(payload);
         if (reply is! SftpStatusPacket) throw SftpError('Unexpected reply');
         SftpStatusError.check(reply);

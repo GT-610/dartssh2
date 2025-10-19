@@ -31,6 +31,7 @@ void main() {
         await SSHSocket.connect('test.rebex.net', 22),
         username: 'demos',
         identities: await getTestKeyPairs(),
+        onVerifyHostKey: acceptTestHostKey,
       );
       try {
         await client.authenticated;
@@ -49,6 +50,7 @@ void main() {
           ...await getTestKeyPairs(),
           ...await getTestKeyPairs(),
         ],
+        onVerifyHostKey: acceptTestHostKey,
       );
       try {
         await client.authenticated;
@@ -67,6 +69,7 @@ void main() {
           username: 'demo',
           onPasswordRequest: () => 'bad-password',
           identities: await getTestKeyPairs(),
+          onVerifyHostKey: acceptTestHostKey,
         );
         try {
           await client.authenticated;
@@ -83,6 +86,7 @@ void main() {
         await SSHSocket.connect('test.rebex.net', 22),
         username: 'demo',
         identities: [],
+        onVerifyHostKey: acceptTestHostKey,
       );
       try {
         await client.authenticated;

@@ -485,7 +485,9 @@ class SSHHttpClientResponse {
         if (line.trim().isEmpty) {
           inBody = true;
           // Decide body framing
-          final te = headers[SSHHttpHeaders.transferEncodingHeader]?.join(',').toLowerCase();
+          final te = headers[SSHHttpHeaders.transferEncodingHeader]
+              ?.join(',')
+              .toLowerCase();
           if (te != null && te.contains('chunked')) {
             chunked = true;
             expectingChunkSize = true;

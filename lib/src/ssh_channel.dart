@@ -334,10 +334,10 @@ class SSHChannelController {
 
     // Determine the target window size, respecting RFC limits.
     // localInitialWindowSize is typically a positive value (e.g., 2MB).
-    final int targetWindow =
-        (localInitialWindowSize > maxRfcWindowSize || localInitialWindowSize < 0)
-            ? maxRfcWindowSize
-            : localInitialWindowSize;
+    final int targetWindow = (localInitialWindowSize > maxRfcWindowSize ||
+            localInitialWindowSize < 0)
+        ? maxRfcWindowSize
+        : localInitialWindowSize;
 
     // If the current local window is already at or above the target,
     // no further increase is needed.

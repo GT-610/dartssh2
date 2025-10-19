@@ -113,11 +113,18 @@ class SSHAlgorithms {
       SSHHostkeyType.rsaSha1,
     ],
 
-    /// Prefer CTR modes; keep CBC last for legacy servers only.
+    /// Prefer AES-GCM/CTR first for compatibility; keep ChaCha20-Poly1305
+    /// available but lower priority until its transport implementation fully
+    /// stabilises. CBC remains as legacy fallback only.
     this.cipher = const [
+      // Prioritise widely-supported CTR modes for compatibility
       SSHCipherType.aes256ctr,
       SSHCipherType.aes128ctr,
-      // Legacy fallbacks (CBC) susceptible to padding oracle issues
+      // Offer AEAD modes once interoperability improves
+      SSHCipherType.aes256gcm,
+      SSHCipherType.aes128gcm,
+      SSHCipherType.chacha20poly1305,
+      // Legacy fallbacks (CBC)
       SSHCipherType.aes256cbc,
       SSHCipherType.aes128cbc,
     ],

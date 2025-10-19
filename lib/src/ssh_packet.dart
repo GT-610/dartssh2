@@ -72,7 +72,8 @@ class SSHPacketSN {
   void increase() {
     if (_value == 0xffffffff) {
       // RFC 4251: This should never happen - must rekey before wrap
-      throw SSHStateError('Sequence number wrapped - connection must be rekeyed');
+      throw SSHStateError(
+          'Sequence number wrapped - connection must be rekeyed');
     } else {
       _value++;
     }

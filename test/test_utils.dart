@@ -4,12 +4,20 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:dartssh2/src/message/base.dart';
 
+const testSshHost = 'test.rebex.net';
+const testSshPort = 22;
+
+Future<bool> acceptTestHostKey(String type, Uint8List fingerprint) async {
+  return true;
+}
+
 /// A honeypot that accepts all passwords and public-keys
 Future<SSHClient> getHoneypotClient() async {
   return SSHClient(
-    await SSHSocket.connect('test.rebex.net', 22),
+    await SSHSocket.connect(testSshHost, testSshPort),
     username: 'demo',
     onPasswordRequest: () => 'password',
+    onVerifyHostKey: acceptTestHostKey,
   );
 }
 
@@ -19,15 +27,17 @@ Future<SSHClient> getDenyingHoneypotClient() async {
     await SSHSocket.connect('honeypot.terminal.studio', 2023),
     username: 'root',
     onPasswordRequest: () => 'random',
+    onVerifyHostKey: acceptTestHostKey,
   );
 }
 
 /// A test server provided by test.rebex.net.
 Future<SSHClient> getTestClient() async {
   return SSHClient(
-    await SSHSocket.connect('test.rebex.net', 22),
+    await SSHSocket.connect(testSshHost, testSshPort),
     username: 'demo',
     onPasswordRequest: () => 'password',
+    onVerifyHostKey: acceptTestHostKey,
   );
 }
 

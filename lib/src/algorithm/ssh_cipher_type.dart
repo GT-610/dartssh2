@@ -13,8 +13,7 @@ class SSHCipherType with SSHAlgorithm {
     aes256ctr,
     aes128gcm,
     aes256gcm,
-    // TODO: Uncomment when ChaCha20-Poly1305 implementation is complete
-    // chacha20poly1305,
+    chacha20poly1305,
   ];
 
   static const aes128ctr = SSHCipherType._(
@@ -69,13 +68,13 @@ class SSHCipherType with SSHAlgorithm {
     tagSize: 16,
   );
 
-  // static const chacha20poly1305 = SSHCipherType._(
-  //   name: 'chacha20-poly1305@openssh.com',
-  //   keySize: 64, // 32 bytes for ChaCha20 key + 32 bytes for Poly1305 key
-  //   cipherFactory: _chacha20Poly1305Factory,
-  //   isAEAD: true,
-  //   tagSize: 16,
-  // );
+  static const chacha20poly1305 = SSHCipherType._(
+    name: 'chacha20-poly1305@openssh.com',
+    keySize: 32, // ChaCha20-Poly1305 uses a single 256-bit key
+    cipherFactory: _chacha20Poly1305Factory,
+    isAEAD: true,
+    tagSize: 16,
+  );
 
   static SSHCipherType? fromName(String name) {
     for (final value in values) {
@@ -121,7 +120,7 @@ class SSHCipherType with SSHAlgorithm {
     if (isAEAD) {
       throw StateError('Use createAEADCipher for AEAD modes');
     }
-    
+
     if (key.length != keySize) {
       throw ArgumentError.value(key, 'key', 'Key must be $keySize bytes long');
     }
@@ -135,8 +134,10 @@ class SSHCipherType with SSHAlgorithm {
     return cipher;
   }
 
-  /// Creates cipher for AEAD modes
-  AEADBlockCipher createAEADCipher(
+  /// Creates cipher for AEAD modes. Returns a dynamic AEAD cipher instance
+  /// (either AEADBlockCipher like GCM, or AEADCipher like ChaCha20-Poly1305)
+  /// supporting `init(...)` and `process(Uint8List)`.
+  dynamic createAEADCipher(
     Uint8List key,
     Uint8List nonce, {
     required bool forEncryption,
@@ -145,12 +146,12 @@ class SSHCipherType with SSHAlgorithm {
     if (!isAEAD) {
       throw StateError('Use createCipher for non-AEAD modes');
     }
-    
+
     if (key.length != keySize) {
       throw ArgumentError.value(key, 'key', 'Key must be $keySize bytes long');
     }
 
-    final cipher = cipherFactory() as AEADBlockCipher;
+    final cipher = cipherFactory();
     final params = AEADParameters(
       KeyParameter(key),
       tagSize * 8, // tagSize in bits
@@ -172,6 +173,12 @@ BlockCipher _aesCbcFactory() {
 }
 
 /// Creates AES-GCM cipher factory
-AEADBlockCipher _aesGcmFactory() {
+dynamic _aesGcmFactory() {
   return GCMBlockCipher(AESEngine());
+}
+
+/// Creates ChaCha20-Poly1305 AEAD cipher factory
+dynamic _chacha20Poly1305Factory() {
+  // Construct AEAD from underlying ChaCha20 engine and Poly1305 MAC
+  return ChaCha20Poly1305(ChaCha7539Engine(), Poly1305());
 }

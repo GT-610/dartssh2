@@ -27,7 +27,8 @@ typedef SSHHostKeysHandler = void Function(List<SSHHostKey> hostKeys);
 /// https://datatracker.ietf.org/doc/html/rfc4252#section-8
 typedef SSHPasswordRequestHandler = FutureOr<String?> Function();
 
-typedef SSHChangePasswordRequestHandler = FutureOr<SSHChangePasswordResponse?> Function(String prompt);
+typedef SSHChangePasswordRequestHandler = FutureOr<SSHChangePasswordResponse?>
+    Function(String prompt);
 
 /// https://datatracker.ietf.org/doc/html/rfc4256#section-3.3
 typedef SSHUserInfoRequestHandler = FutureOr<List<String>?> Function(
@@ -257,8 +258,9 @@ class SSHClient {
 
   final _remoteForwards = <SSHRemoteForward>{};
 
-  late final _keepAlive =
-      keepAliveInterval != null ? SSHKeepAlive(ping: ping, interval: keepAliveInterval!) : null;
+  late final _keepAlive = keepAliveInterval != null
+      ? SSHKeepAlive(ping: ping, interval: keepAliveInterval!)
+      : null;
 
   SSHAuthMethod? _currentAuthMethod;
 
@@ -536,12 +538,16 @@ class SSHClient {
     _handshakeTimeoutTimer?.cancel();
     _handshakeTimeoutTimer = null;
     if (!_authenticated.isCompleted) {
-      final currentMethod =
-          _currentAuthMethod != null ? "Current method: ${_currentAuthMethod!.name}" : "No auth method tried";
-      final attempts = _authAttempts > 0 ? "After $_authAttempts attempts" : "No attempts made";
+      final currentMethod = _currentAuthMethod != null
+          ? "Current method: ${_currentAuthMethod!.name}"
+          : "No auth method tried";
+      final attempts = _authAttempts > 0
+          ? "After $_authAttempts attempts"
+          : "No attempts made";
 
       _authenticated.completeError(
-        SSHAuthAbortError('Connection closed before authentication. $currentMethod. $attempts'),
+        SSHAuthAbortError(
+            'Connection closed before authentication. $currentMethod. $attempts'),
       );
     }
     _keepAlive?.stop();
@@ -551,7 +557,8 @@ class SSHClient {
   void _onHandshakeTimeout() {
     // 若在握手阶段一直未就绪，则返回握手超时错误并关闭连接
     if (_authenticated.isCompleted) return;
-    final msg = 'Handshake timed out after ${handshakeTimeout.inSeconds} seconds.';
+    final msg =
+        'Handshake timed out after ${handshakeTimeout.inSeconds} seconds.';
     _authenticated.completeError(SSHHandshakeError(msg));
     // 认证阶段不会开始，取消其定时器以避免误触发
     _authTimeoutTimer?.cancel();
@@ -637,7 +644,8 @@ class SSHClient {
         return _startAuthentication();
       default:
         printDebug?.call('Unknown serviceName: ${message.serviceName}');
-        _transport.closeWithError(SSHStateError('Server accepted unknown service: ${message.serviceName}'));
+        _transport.closeWithError(SSHStateError(
+            'Server accepted unknown service: ${message.serviceName}'));
     }
   }
 
@@ -660,7 +668,8 @@ class SSHClient {
     printDebug?.call('Server supports methods: ${availableMethods.join(', ')}');
 
     // Update our authentication strategy based on server's response
-    _updateAuthMethodsBasedOnServerResponse(availableMethods, message.partialSuccess);
+    _updateAuthMethodsBasedOnServerResponse(
+        availableMethods, message.partialSuccess);
 
     _tryNextAuthMethod();
   }
@@ -680,10 +689,11 @@ class SSHClient {
 
   Future<void> _handleUserauthPasswordChangeRequest(Uint8List payload) async {
     printDebug?.call('SSHClient._handleUserauthPasswordChangeRequest');
-    
+
     // RFC 4252: Password change should be disabled if no confidentiality or MAC
     if (!_hasConfidentiality || !_hasMacProtection) {
-      printDebug?.call('Refusing password change - insufficient transport security');
+      printDebug
+          ?.call('Refusing password change - insufficient transport security');
       _tryNextAuthMethod();
       return;
     }
@@ -732,11 +742,12 @@ class SSHClient {
   void _handleUserauthBanner(Uint8List payload) {
     final message = SSH_Message_Userauth_Banner.decode(payload);
     printTrace?.call('<- $socket: $message');
-    
+
     // RFC 4252: Apply control character filtering to prevent terminal attacks
     final sanitizedMessage = _sanitizeBannerMessage(message.message);
-    printDebug?.call('Received authentication banner (${message.message.length} chars, ${sanitizedMessage.length} after sanitization)');
-    
+    printDebug?.call(
+        'Received authentication banner (${message.message.length} chars, ${sanitizedMessage.length} after sanitization)');
+
     onUserauthBanner?.call(sanitizedMessage);
   }
 
@@ -752,7 +763,8 @@ class SSHClient {
         handled = true;
         break;
       default:
-        printDebug?.call('Received unhandled global request "${message.requestName}".');
+        printDebug?.call(
+            'Received unhandled global request "${message.requestName}".');
         break;
     }
 
@@ -774,7 +786,8 @@ class SSHClient {
             'Received hostkeys-00@openssh.com request with no host keys or hostKeys field not populated.');
       }
     } else {
-      printDebug?.call('Received hostkeys-00@openssh.com but no onHostKeys handler is set.');
+      printDebug?.call(
+          'Received hostkeys-00@openssh.com but no onHostKeys handler is set.');
     }
     // hostkeys-00@openssh.com global request has wantReply=false,
     // so no SSH_Message_Request_Success or Failure is sent.
@@ -948,7 +961,8 @@ class SSHClient {
     final hasConfidentiality = _hasConfidentiality;
     final hasMac = _hasMacProtection;
 
-    printDebug?.call('Transport confidentiality: $hasConfidentiality, MAC: $hasMac');
+    printDebug
+        ?.call('Transport confidentiality: $hasConfidentiality, MAC: $hasMac');
 
     // RFC 4252: First try "none" method to get list of supported methods
     _authMethodsLeft.add(SSHAuthMethod.none);
@@ -960,8 +974,8 @@ class SSHClient {
     // RFC 4252: Password authentication should be disabled if no confidentiality
     if (onPasswordRequest != null) {
       if (!hasConfidentiality) {
-        printDebug
-            ?.call('WARNING: Password authentication disabled - no transport confidentiality (RFC 4252)');
+        printDebug?.call(
+            'WARNING: Password authentication disabled - no transport confidentiality (RFC 4252)');
       } else {
         _authMethodsLeft.add(SSHAuthMethod.password);
       }
@@ -1007,7 +1021,8 @@ class SSHClient {
       ].join(', ');
 
       return _authenticated.completeError(
-        SSHAuthFailError('All authentication methods failed. Tried: $triedMethods'),
+        SSHAuthFailError(
+            'All authentication methods failed. Tried: $triedMethods'),
         StackTrace.current,
       );
     }
@@ -1035,7 +1050,8 @@ class SSHClient {
 
     // RFC 4252: The main purpose of sending "none" is to get the list
     // of supported methods from the server
-    printDebug?.call('Sending "none" authentication to discover supported methods');
+    printDebug
+        ?.call('Sending "none" authentication to discover supported methods');
     _sendMessage(SSH_Message_Userauth_Request.none(user: username));
   }
 
@@ -1044,7 +1060,8 @@ class SSHClient {
 
     // RFC 4252: Check confidentiality before sending password
     if (!_hasConfidentiality) {
-      printDebug?.call('Refusing password authentication - no transport confidentiality');
+      printDebug?.call(
+          'Refusing password authentication - no transport confidentiality');
       _tryNextAuthMethod();
       return;
     }
@@ -1106,7 +1123,8 @@ class SSHClient {
     final keyPair = _hostbasedKeyPairsLeft.removeFirst();
 
     if (hostName == null || userNameOnClientHost == null) {
-      printDebug?.call('SSHClient._authWithHostbased: missing hostname or username');
+      printDebug
+          ?.call('SSHClient._authWithHostbased: missing hostname or username');
       _tryNextAuthMethod();
       return;
     }
@@ -1146,7 +1164,8 @@ class SSHClient {
   }
 
   /// Updates the authentication method queue based on server's response
-  void _updateAuthMethodsBasedOnServerResponse(List<String> serverMethods, bool partialSuccess) {
+  void _updateAuthMethodsBasedOnServerResponse(
+      List<String> serverMethods, bool partialSuccess) {
     // RFC 4252: Server tells us which methods may productively continue
     final supportedMethods = <SSHAuthMethod>[];
 
@@ -1181,7 +1200,8 @@ class SSHClient {
           printDebug?.call('Warning: Server listed "none" as supported method');
           break;
         default:
-          printDebug?.call('Unknown authentication method from server: $methodName');
+          printDebug
+              ?.call('Unknown authentication method from server: $methodName');
       }
     }
 
@@ -1190,11 +1210,13 @@ class SSHClient {
     _authMethodsLeft.addAll(supportedMethods);
 
     if (partialSuccess) {
-      printDebug?.call('Partial authentication success - continuing with additional methods');
+      printDebug?.call(
+          'Partial authentication success - continuing with additional methods');
     }
 
     if (_authMethodsLeft.isEmpty) {
-      printDebug?.call('No mutually supported authentication methods available');
+      printDebug
+          ?.call('No mutually supported authentication methods available');
     }
   }
 
@@ -1303,7 +1325,8 @@ class SSHClient {
         attemptedMethods.add(_currentAuthMethod!.name);
       }
 
-      var timeoutMessage = 'Authentication timed out after ${authTimeout.inSeconds} seconds.';
+      var timeoutMessage =
+          'Authentication timed out after ${authTimeout.inSeconds} seconds.';
 
       if (_authAttempts > 0) {
         timeoutMessage += ' Made $_authAttempts authentication attempts.';
@@ -1337,7 +1360,7 @@ extension on SSHClient {
 
 extension on SSHClient {
   /// Sanitize banner message according to RFC 4252 recommendations
-  /// 
+  ///
   /// This method filters control characters to prevent terminal control
   /// character attacks as recommended by RFC 4252.
   String _sanitizeBannerMessage(String message) {
@@ -1346,30 +1369,35 @@ extension on SSHClient {
     const maxLineLength = 1024; // Reasonable limit to prevent DoS
     var totalLength = 0;
     const maxTotalLength = 8192; // Total message size limit
-    
+
     for (int i = 0; i < message.length && totalLength < maxTotalLength; i++) {
       final code = message.codeUnitAt(i);
-      
+
       // RFC 4252: Allow specific control characters
-      if (code == 9) {          // TAB
+      if (code == 9) {
+        // TAB
         buffer.writeCharCode(code);
         lineLength += 4; // Count as 4 chars for line length
         totalLength++;
-      } else if (code == 10) {  // LF (Line Feed)
+      } else if (code == 10) {
+        // LF (Line Feed)
         buffer.writeCharCode(code);
         lineLength = 0; // Reset line length
         totalLength++;
-      } else if (code == 13) {  // CR (Carriage Return)
+      } else if (code == 13) {
+        // CR (Carriage Return)
         buffer.writeCharCode(code);
         // Don't reset line length for CR, might be part of CRLF
         totalLength++;
-      } else if (code >= 32 && code <= 126) { // Printable ASCII
+      } else if (code >= 32 && code <= 126) {
+        // Printable ASCII
         if (lineLength < maxLineLength) {
           buffer.writeCharCode(code);
           lineLength++;
         }
         totalLength++;
-      } else if (code > 127) {  // Non-ASCII (UTF-8)
+      } else if (code > 127) {
+        // Non-ASCII (UTF-8)
         // Allow valid UTF-8 characters but be careful with length
         if (lineLength < maxLineLength) {
           buffer.writeCharCode(code);
@@ -1386,21 +1414,22 @@ extension on SSHClient {
         }
         totalLength += escaped.length;
       }
-      
+
       // Prevent excessively long lines
       if (lineLength >= maxLineLength) {
         buffer.writeln(''); // Force line break
         lineLength = 0;
       }
     }
-    
+
     final result = buffer.toString();
-    
+
     // Log if message was truncated
     if (totalLength >= maxTotalLength) {
-      printDebug?.call('Banner message truncated at $maxTotalLength characters for security');
+      printDebug?.call(
+          'Banner message truncated at $maxTotalLength characters for security');
     }
-    
+
     return result;
   }
 }

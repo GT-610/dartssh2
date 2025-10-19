@@ -24,8 +24,7 @@ class _NullSink implements StreamSink<List<int>> {
 }
 
 class _FakeSocket implements SSHSocket {
-  _FakeSocket(List<int> bytes)
-      : _controller = StreamController<Uint8List>() {
+  _FakeSocket(List<int> bytes) : _controller = StreamController<Uint8List>() {
     // Emit bytes then close.
     _controller.add(Uint8List.fromList(bytes));
     _controller.close();
@@ -56,8 +55,7 @@ class _FakeSocket implements SSHSocket {
 void main() {
   group('SSHHttpClientResponse chunked decoding', () {
     test('decodes simple chunked body', () async {
-      const response =
-          'HTTP/1.1 200 OK\r\n'
+      const response = 'HTTP/1.1 200 OK\r\n'
           'Content-Type: text/plain; charset=utf-8\r\n'
           'Transfer-Encoding: chunked\r\n'
           '\r\n'
@@ -74,10 +72,10 @@ void main() {
       final res = await SSHHttpClientResponse.from(socket);
 
       expect(res.statusCode, 200);
-      expect(res.headers.value(SSHHttpHeaders.transferEncodingHeader), 'chunked');
+      expect(
+          res.headers.value(SSHHttpHeaders.transferEncodingHeader), 'chunked');
       expect(res.headers.contentLength, -1);
       expect(res.body, 'MozillaDeveloperNetwork');
     });
   });
 }
-

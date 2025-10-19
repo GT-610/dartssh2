@@ -19,13 +19,14 @@ abstract class SSHUserAuthMessageNumbers {
 
   /// Validate message number is in correct range
   static bool isValidAuthMessageId(int messageId) {
-    return (messageId >= 50 && messageId <= 53) || (messageId >= 60 && messageId <= 79);
+    return (messageId >= 50 && messageId <= 53) ||
+        (messageId >= 60 && messageId <= 79);
   }
 }
 
 class SSH_Message_Userauth_Request extends SSHMessage {
   /// 50
-  static const messageId = SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_REQUEST; 
+  static const messageId = SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_REQUEST;
 
   final String user;
   final String serviceName;
@@ -417,7 +418,8 @@ class SSH_Message_Userauth_Banner extends SSHMessage {
 
 class SSH_Message_Userauth_Passwd_ChangeReq extends SSHMessage {
   /// 60
-  static const messageId = SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_PASSWD_CHANGEREQ;
+  static const messageId =
+      SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_PASSWD_CHANGEREQ;
 
   final String prompt;
 
@@ -450,7 +452,8 @@ class SSH_Message_Userauth_Passwd_ChangeReq extends SSHMessage {
 
 class SSH_Message_Userauth_InfoRequest implements SSHMessage {
   /// 60
-  static const messageId = SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_INFO_REQUEST;
+  static const messageId =
+      SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_INFO_REQUEST;
 
   final String name;
   final String instruction;
@@ -510,7 +513,8 @@ class SSH_Message_Userauth_InfoRequest implements SSHMessage {
 
 class SSH_Message_Userauth_InfoResponse implements SSHMessage {
   /// 61
-  static const messageId = SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_INFO_RESPONSE;
+  static const messageId =
+      SSHUserAuthMessageNumbers.SSH_MSG_USERAUTH_INFO_RESPONSE;
 
   final List<String> responses;
 

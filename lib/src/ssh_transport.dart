@@ -12,6 +12,7 @@ import 'package:dartssh2/src/ssh_algorithm.dart';
 import 'package:dartssh2/src/ssh_kex.dart';
 import 'package:dartssh2/src/utils/bigint.dart';
 import 'package:dartssh2/src/utils/cipher_ext.dart';
+import 'package:dartssh2/src/utils/chacha.dart';
 import 'package:dartssh2/src/utils/chunk_buffer.dart';
 import 'package:dartssh2/src/ssh_kex_utils.dart';
 import 'package:dartssh2/src/ssh_packet.dart';
@@ -166,6 +167,21 @@ class SSHTransport {
   /// A [BlockCipher] to decrypt data sent from the other side.
   BlockCipher? _decryptCipher;
 
+  // AEAD (GCM / ChaCha20-Poly1305) keys and nonces (per direction)
+  Uint8List? _localAeadKey; // key for data we send
+  Uint8List?
+      _localAeadFixedNonce; // 12-byte fixed part of nonce for data we send
+  Uint8List? _remoteAeadKey; // key for data we receive
+  Uint8List?
+      _remoteAeadFixedNonce; // 12-byte fixed part of nonce for data we receive
+
+  // OpenSSH chacha20-poly1305 uses two 32-byte keys per direction
+  Uint8List?
+      _localChaChaEncKey; // payload encryption / poly1305 one-time key generator
+  Uint8List? _localChaChaLenKey; // length field encryption key
+  Uint8List? _remoteChaChaEncKey; // payload decryption / poly1305 key generator
+  Uint8List? _remoteChaChaLenKey; // length field decryption key
+
   /// A [Mac] used to authenticate data sent to the other side.
   Mac? _localMac;
 
@@ -193,8 +209,18 @@ class SSHTransport {
       _sendKexInit();
     }
 
-    final packetAlign =
-        _encryptCipher == null ? SSHPacket.minAlign : max(SSHPacket.minAlign, _encryptCipher!.blockSize);
+    final ctLocal = isClient ? _clientCipherType : _serverCipherType;
+    final usingAead = ctLocal?.isAEAD ?? false;
+    final isChaCha = ctLocal?.name == 'chacha20-poly1305@openssh.com';
+    final aeadReady = isChaCha
+        ? (_localChaChaEncKey != null && _localChaChaLenKey != null)
+        : (_localAeadKey != null && _localAeadFixedNonce != null);
+    final encryptionActive = usingAead ? aeadReady : (_encryptCipher != null);
+    final packetAlign = encryptionActive
+        ? (usingAead
+            ? SSHPacket.minAlign
+            : max(SSHPacket.minAlign, _encryptCipher!.blockSize))
+        : SSHPacket.minAlign;
 
     final packet = SSHPacket.pack(data, align: packetAlign);
 
@@ -207,7 +233,64 @@ class SSHTransport {
       _bytesSent = 0;
     }
 
-    if (_encryptCipher == null) {
+    if (usingAead && aeadReady) {
+      // AEAD packet format (OpenSSH-style):
+      // - 4-byte packet length is sent in the clear and used as AAD
+      // - the remaining packet bytes (padding_length + payload + padding)
+      //   are encrypted and followed by the AEAD authentication tag
+
+      final cipherType = isClient ? _clientCipherType! : _serverCipherType!;
+      if (cipherType.name == 'chacha20-poly1305@openssh.com') {
+        // OpenSSH chacha20-poly1305 framing: encrypt 4-byte length and payload;
+        // MAC is Poly1305 over enc_len || enc_payload with a one-time key.
+        final encKey = _localChaChaEncKey;
+        final lenKey = _localChaChaLenKey;
+        if (encKey == null || lenKey == null) {
+          throw StateError('ChaCha20-Poly1305 keys not initialized');
+        }
+        final out =
+            _encryptChaChaOpenSSH(packet, encKey, lenKey, _localPacketSN.value);
+        // Account for AEAD tag in data limit for rekey
+        _bytesSent += cipherType.tagSize;
+        socket.sink.add(out);
+      } else {
+        final key = _localAeadKey!;
+        final fixedNonce = _localAeadFixedNonce!; // 12 bytes
+
+        // Split packet into len (AAD) and body to encrypt
+        final lenBytes = Uint8List.sublistView(packet, 0, 4);
+        final body = Uint8List.sublistView(packet, 4);
+
+        // Compose per-packet nonce from fixed part + packet sequence number
+        final nonce = _composeAeadNonce(fixedNonce, _localPacketSN.value);
+
+        final aead = cipherType.createAEADCipher(
+          key,
+          nonce,
+          forEncryption: true,
+          aad: lenBytes,
+        );
+
+        // Process with AEAD API to support both GCM and ChaCha20-Poly1305
+        final outLen = aead.getOutputSize(body.length);
+        var encryptedWithTag = Uint8List(outLen);
+        var written =
+            aead.processBytes(body, 0, body.length, encryptedWithTag, 0);
+        written += aead.doFinal(encryptedWithTag, written);
+        if (written != encryptedWithTag.length) {
+          encryptedWithTag =
+              Uint8List.sublistView(encryptedWithTag, 0, written);
+        }
+
+        // Account for AEAD tag in data limit for rekey
+        _bytesSent += cipherType.tagSize;
+
+        final out = BytesBuilder(copy: false)
+          ..add(lenBytes)
+          ..add(encryptedWithTag);
+        socket.sink.add(out.takeBytes());
+      }
+    } else if (_encryptCipher == null) {
       socket.sink.add(packet);
     } else {
       final mac = _localMac!;
@@ -353,7 +436,20 @@ class SSHTransport {
   /// WITHOUT `packet length`, `padding length`, `padding` and `MAC`. Returns
   /// `null` if there is not enough data in the buffer to read the packet.
   Uint8List? _consumePacket() {
-    return _decryptCipher == null ? _consumeClearTextPacket() : _consumeEncryptedPacket();
+    final ct = isClient ? _serverCipherType : _clientCipherType;
+    final usingAead = ct?.isAEAD ?? false;
+    if (usingAead) {
+      final isChaCha = ct?.name == 'chacha20-poly1305@openssh.com';
+      final aeadReady = isChaCha
+          ? (_remoteChaChaEncKey != null && _remoteChaChaLenKey != null)
+          : (_remoteAeadKey != null && _remoteAeadFixedNonce != null);
+      if (aeadReady) {
+        return _consumeAeadPacket();
+      }
+    }
+    return _decryptCipher == null
+        ? _consumeClearTextPacket()
+        : _consumeEncryptedPacket();
   }
 
   Uint8List? _consumeClearTextPacket() {
@@ -415,6 +511,83 @@ class SSHTransport {
     return Uint8List.sublistView(packet, 5, packet.length - paddingLength);
   }
 
+  /// AEAD (GCM/ChaCha20-Poly1305) packet consumption.
+  ///
+  /// Layout:
+  ///  - 4-byte packet length (plaintext, used as AAD)
+  ///  - encrypted (padding_length + payload + padding)
+  ///  - authentication tag (cipherType.tagSize)
+  Uint8List? _consumeAeadPacket() {
+    printDebug?.call('SSHTransport._consumeAeadPacket');
+
+    if (_buffer.length < 4) {
+      return null;
+    }
+
+    final cipherType = isClient ? _serverCipherType! : _clientCipherType!;
+    final tagSize = cipherType.tagSize;
+
+    if (cipherType.name == 'chacha20-poly1305@openssh.com') {
+      return _consumeChaChaOpenSSHPacket();
+    }
+
+    final len = SSHPacket.readPacketLength(_buffer.data);
+    _verifyPacketLength(len);
+
+    final totalNeeded = 4 + len + tagSize;
+    if (_buffer.length < totalNeeded) {
+      return null;
+    }
+
+    final lenBytes = _buffer.consume(4);
+    final ciphertext = _buffer.consume(len);
+    final tag = _buffer.consume(tagSize);
+
+    final key = _remoteAeadKey!;
+    final fixedNonce = _remoteAeadFixedNonce!; // 12 bytes
+    final nonce = _composeAeadNonce(fixedNonce, _remotePacketSN.value);
+
+    final aead = cipherType.createAEADCipher(
+      key,
+      nonce,
+      forEncryption: false,
+      aad: lenBytes,
+    );
+
+    // Concatenate ciphertext + tag for processing
+    final encWithTagBuilder = BytesBuilder(copy: false)
+      ..add(ciphertext)
+      ..add(tag);
+    final encWithTag = encWithTagBuilder.takeBytes();
+
+    // Decrypt and authenticate
+    Uint8List decrypted;
+    try {
+      final outLen = aead.getOutputSize(encWithTag.length);
+      decrypted = Uint8List(outLen);
+      var written =
+          aead.processBytes(encWithTag, 0, encWithTag.length, decrypted, 0);
+      written += aead.doFinal(decrypted, written);
+      if (written != decrypted.length) {
+        decrypted = Uint8List.sublistView(decrypted, 0, written);
+      }
+    } on Exception catch (e) {
+      // Normalize AEAD auth/tag failures to SSHPacketError
+      throw SSHPacketError('AEAD decrypt/authentication failed: $e');
+    }
+
+    // decrypted = [padding_length | payload | padding]
+    if (decrypted.isEmpty) {
+      throw SSHPacketError('AEAD decrypted empty packet body');
+    }
+
+    final paddingLength = ByteData.sublistView(decrypted).getUint8(0);
+    final payloadLength = len - paddingLength - 1;
+    _verifyPacketPadding(payloadLength, paddingLength);
+
+    return Uint8List.sublistView(decrypted, 1, 1 + payloadLength);
+  }
+
   void _verifyPacketLength(int packetLength) {
     if (packetLength < 1 || packetLength > SSHPacket.maxLength) {
       throw SSHPacketError('Packet too long or invalid length: $packetLength');
@@ -424,8 +597,9 @@ class SSHTransport {
   /// Verifies that the padding of the packet is correct. Throws [SSHPacketError]
   /// if the padding is incorrect.
   void _verifyPacketPadding(int payloadLength, int paddingLength) {
-    final expectedPacketAlign =
-        _decryptCipher == null ? SSHPacket.minAlign : max(SSHPacket.minAlign, _decryptCipher!.blockSize);
+    final expectedPacketAlign = _decryptCipher == null
+        ? SSHPacket.minAlign
+        : max(SSHPacket.minAlign, _decryptCipher!.blockSize);
 
     final minPaddingLength = SSHPacket.paddingLength(
       payloadLength,
@@ -444,7 +618,8 @@ class SSHTransport {
   void _verifyPacketMac(Uint8List payload, Uint8List actualMac) {
     final macSize = _remoteMac!.macSize;
     if (actualMac.length != macSize) {
-      throw SSHPacketError('Invalid MAC size: ${actualMac.length}, expected: $macSize');
+      throw SSHPacketError(
+          'Invalid MAC size: ${actualMac.length}, expected: $macSize');
     }
 
     _remoteMac!.updateAll(_remotePacketSN.value.toUint32());
@@ -475,57 +650,278 @@ class SSHTransport {
     }
   }
 
+  /// Encrypt packet using OpenSSH chacha20-poly1305 construction.
+  /// Input [packet] is 4-byte length (plaintext) + body (padding_len|payload|padding).
+  /// Output: enc_len(4) || enc_body || tag(16)
+  Uint8List _encryptChaChaOpenSSH(
+      Uint8List packet, Uint8List encKey, Uint8List lenKey, int seq) {
+    // Split length and body
+    final lenBytes = Uint8List.sublistView(packet, 0, 4);
+    final body = Uint8List.sublistView(packet, 4);
+
+    // Nonce per OpenSSH: 0x00000000 || uint64_le(seq) (upper 32 bits zero)
+    final nonce = _composeChaChaNonce(seq);
+
+    // 1) Encrypt 4-byte length using second key (counter=0)
+    final encLen = Uint8List(4);
+    final chachaLen = ChaCha7539Engine();
+    chachaLen.init(true, ParametersWithIV(KeyParameter(lenKey), nonce));
+    chachaLen.processBytes(lenBytes, 0, 4, encLen, 0);
+
+    // 2) Derive one-time Poly1305 key from first 32 bytes of keystream (block 0)
+    final chachaForPoly = ChaCha7539Engine();
+    chachaForPoly.init(true, ParametersWithIV(KeyParameter(encKey), nonce));
+    final polyBlock = Uint8List(64);
+    chachaForPoly.processBytes(polyBlock, 0, 64, polyBlock, 0);
+    final polyKey = Uint8List.sublistView(polyBlock, 0, 32);
+
+    // 3) Encrypt body using chacha(encKey) starting from block 1
+    final chachaPayload = ChaCha7539Engine();
+    chachaPayload.init(true, ParametersWithIV(KeyParameter(encKey), nonce));
+    if (body.isNotEmpty) {
+      final discard = Uint8List(64); // advance one block
+      chachaPayload.processBytes(discard, 0, 64, discard, 0);
+    }
+    final encBody = Uint8List(body.length);
+    chachaPayload.processBytes(body, 0, body.length, encBody, 0);
+
+    // 4) Poly1305 over: enc_len || pad16 || enc_body || pad16 || len(aad) LE64 || len(cipher) LE64
+    final mac = Poly1305()..init(KeyParameter(polyKey));
+    _poly1305UpdatePadded(mac, encLen);
+    _poly1305UpdatePadded(mac, encBody);
+    mac.updateAll(_le64(encLen.length));
+    mac.updateAll(_le64(encBody.length));
+    final tag = mac.finish();
+
+    final out = BytesBuilder(copy: false)
+      ..add(encLen)
+      ..add(encBody)
+      ..add(tag);
+    return out.takeBytes();
+  }
+
+  /// Consume one OpenSSH chacha20-poly1305 packet from buffer.
+  Uint8List? _consumeChaChaOpenSSHPacket() {
+    // Need at least 4 bytes encrypted length
+    if (_buffer.length < 4) return null;
+
+    final encKey = _remoteChaChaEncKey;
+    final lenKey = _remoteChaChaLenKey;
+    if (encKey == null || lenKey == null) {
+      throw StateError('ChaCha20-Poly1305 keys not initialized');
+    }
+    final nonce = _composeChaChaNonce(_remotePacketSN.value);
+
+    // Poly1305 one-time key will be derived after reading enc_len + enc_body
+
+    // Peek and decrypt 4-byte length
+    final encLenBytes = _buffer.view(0, 4);
+    final decLen = Uint8List(4);
+    final chachaLen = ChaCha7539Engine();
+    chachaLen.init(false, ParametersWithIV(KeyParameter(lenKey), nonce));
+    chachaLen.processBytes(encLenBytes, 0, 4, decLen, 0);
+
+    final len = SSHPacket.readPacketLength(decLen);
+    _verifyPacketLength(len);
+
+    final cipherType = isClient ? _serverCipherType! : _clientCipherType!;
+    final tagSize = cipherType.tagSize;
+    final totalNeeded = 4 + len + tagSize;
+    if (_buffer.length < totalNeeded) {
+      return null;
+    }
+
+    // Now consume enc_len, enc_body, tag
+    final encLen = _buffer.consume(4);
+    final encBody = _buffer.consume(len);
+    final tag = _buffer.consume(tagSize);
+
+    // Derive one-time Poly1305 key (from block 0)
+    final chachaForPoly = ChaCha7539Engine();
+    chachaForPoly.init(false, ParametersWithIV(KeyParameter(encKey), nonce));
+    final polyBlock = Uint8List(64);
+    chachaForPoly.processBytes(polyBlock, 0, 64, polyBlock, 0);
+    final polyKey = Uint8List.sublistView(polyBlock, 0, 32);
+
+    // Verify MAC
+    final mac = Poly1305()..init(KeyParameter(polyKey));
+    _poly1305UpdatePadded(mac, encLen);
+    _poly1305UpdatePadded(mac, encBody);
+    mac.updateAll(_le64(encLen.length));
+    mac.updateAll(_le64(encBody.length));
+    final expectedTag = mac.finish();
+    if (!constantTimeEquals(expectedTag, tag)) {
+      throw SSHPacketError('AEAD decrypt/authentication failed: tag mismatch');
+    }
+
+    // Decrypt body using chacha(encKey) starting from block 1
+    final chachaPayload = ChaCha7539Engine();
+    chachaPayload.init(false, ParametersWithIV(KeyParameter(encKey), nonce));
+    if (encBody.isNotEmpty) {
+      final discard = Uint8List(64);
+      chachaPayload.processBytes(discard, 0, 64, discard, 0);
+    }
+    final out = Uint8List(encBody.length);
+    chachaPayload.processBytes(encBody, 0, encBody.length, out, 0);
+
+    // out = [padding_length | payload | padding]
+    if (out.isEmpty) {
+      throw SSHPacketError('AEAD decrypted empty packet body');
+    }
+
+    final paddingLength = ByteData.sublistView(out).getUint8(0);
+    final payloadLength = len - paddingLength - 1;
+    _verifyPacketPadding(payloadLength, paddingLength);
+    return Uint8List.sublistView(out, 1, 1 + payloadLength);
+  }
+
+  // RFC 7539-style Poly1305 block processing with 16-byte padding
+  void _poly1305UpdatePadded(Mac mac, Uint8List data) {
+    if (data.isNotEmpty) {
+      mac.updateAll(data);
+      final rem = data.length & 0x0f;
+      if (rem != 0) {
+        mac.updateAll(Uint8List(16 - rem));
+      }
+    }
+  }
+
+  // little-endian 64-bit length encoding (low 32-bit used)
+  Uint8List _le64(int n) {
+    final out = Uint8List(8);
+    out[0] = n & 0xff;
+    out[1] = (n >>> 8) & 0xff;
+    out[2] = (n >>> 16) & 0xff;
+    out[3] = (n >>> 24) & 0xff;
+    // high 32 bits zero
+    return out;
+  }
+
+  // OpenSSH chacha nonce: 0x00000000 || uint64_le(seq) where upper 32 bits are zero
+  Uint8List _composeChaChaNonce(int seq) {
+    final nonce = Uint8List(12);
+    // bytes[0..3] = 0x00000000
+    // bytes[4..7] = seq (little-endian)
+    nonce[4] = (seq) & 0xff;
+    nonce[5] = (seq >>> 8) & 0xff;
+    nonce[6] = (seq >>> 16) & 0xff;
+    nonce[7] = (seq >>> 24) & 0xff;
+    // bytes[8..11] remain zero (upper 32 bits)
+    return nonce;
+  }
+
   void _applyLocalKeys() {
     final cipherType = isClient ? _clientCipherType : _serverCipherType;
     if (cipherType == null) throw StateError('No cipher type selected');
 
-    _encryptCipher = cipherType.createCipher(
-      _deriveKey(
-        isClient ? SSHDeriveKeyType.clientKey : SSHDeriveKeyType.serverKey,
-        cipherType.keySize,
-      ),
-      _deriveKey(
-        isClient ? SSHDeriveKeyType.clientIV : SSHDeriveKeyType.serverIV,
-        cipherType.ivSize,
-      ),
-      forEncryption: true,
-    );
+    if (cipherType.isAEAD) {
+      if (cipherType.name == 'chacha20-poly1305@openssh.com') {
+        // OpenSSH Chacha20-Poly1305 derives 64 bytes per direction.
+        final rawKey = _deriveKey(
+          isClient ? SSHDeriveKeyType.clientKey : SSHDeriveKeyType.serverKey,
+          64,
+        );
+        final (lenKey: lenKey, encKey: encKey) = splitOpenSSHChaChaKeys(rawKey);
+        _localChaChaLenKey = lenKey;
+        _localChaChaEncKey = encKey;
+        _localAeadKey = null;
+        _localAeadFixedNonce = null;
+      } else {
+        // AEAD: derive key and fixed nonce (12 bytes) for sender direction
+        final key = _deriveKey(
+          isClient ? SSHDeriveKeyType.clientKey : SSHDeriveKeyType.serverKey,
+          cipherType.keySize,
+        );
+        final iv = _deriveKey(
+          isClient ? SSHDeriveKeyType.clientIV : SSHDeriveKeyType.serverIV,
+          cipherType.ivSize,
+        );
+        _localAeadKey = key;
+        _localAeadFixedNonce = Uint8List.sublistView(iv, 0, 12);
+      }
+      _encryptCipher = null;
+      _localMac = null; // AEAD provides integrity
+    } else {
+      _encryptCipher = cipherType.createCipher(
+        _deriveKey(
+          isClient ? SSHDeriveKeyType.clientKey : SSHDeriveKeyType.serverKey,
+          cipherType.keySize,
+        ),
+        _deriveKey(
+          isClient ? SSHDeriveKeyType.clientIV : SSHDeriveKeyType.serverIV,
+          cipherType.ivSize,
+        ),
+        forEncryption: true,
+      );
 
-    final macType = isClient ? _clientMacType : _serverMacType;
-    if (macType == null) throw StateError('No MAC type selected');
+      final macType = isClient ? _clientMacType : _serverMacType;
+      if (macType == null) throw StateError('No MAC type selected');
 
-    final macKey = _deriveKey(
-      isClient ? SSHDeriveKeyType.clientMacKey : SSHDeriveKeyType.serverMacKey,
-      macType.keySize,
-    );
+      final macKey = _deriveKey(
+        isClient
+            ? SSHDeriveKeyType.clientMacKey
+            : SSHDeriveKeyType.serverMacKey,
+        macType.keySize,
+      );
 
-    _localMac = macType.createMac(macKey);
+      _localMac = macType.createMac(macKey);
+    }
   }
 
   void _applyRemoteKeys() {
     final cipherType = isClient ? _serverCipherType : _clientCipherType;
     if (cipherType == null) throw StateError('No cipher type selected');
 
-    _decryptCipher = cipherType.createCipher(
-      _deriveKey(
-        isClient ? SSHDeriveKeyType.serverKey : SSHDeriveKeyType.clientKey,
-        cipherType.keySize,
-      ),
-      _deriveKey(
-        isClient ? SSHDeriveKeyType.serverIV : SSHDeriveKeyType.clientIV,
-        cipherType.ivSize,
-      ),
-      forEncryption: false,
-    );
+    if (cipherType.isAEAD) {
+      if (cipherType.name == 'chacha20-poly1305@openssh.com') {
+        // Derive 64 bytes per direction and split according to OpenSSH spec.
+        final rawKey = _deriveKey(
+          isClient ? SSHDeriveKeyType.serverKey : SSHDeriveKeyType.clientKey,
+          64,
+        );
+        final (lenKey: lenKey, encKey: encKey) = splitOpenSSHChaChaKeys(rawKey);
+        _remoteChaChaLenKey = lenKey;
+        _remoteChaChaEncKey = encKey;
+        _remoteAeadKey = null;
+        _remoteAeadFixedNonce = null;
+      } else {
+        final key = _deriveKey(
+          isClient ? SSHDeriveKeyType.serverKey : SSHDeriveKeyType.clientKey,
+          cipherType.keySize,
+        );
+        final iv = _deriveKey(
+          isClient ? SSHDeriveKeyType.serverIV : SSHDeriveKeyType.clientIV,
+          cipherType.ivSize,
+        );
+        _remoteAeadKey = key;
+        _remoteAeadFixedNonce = Uint8List.sublistView(iv, 0, 12);
+      }
+      _decryptCipher = null;
+      _remoteMac = null; // AEAD provides integrity
+    } else {
+      _decryptCipher = cipherType.createCipher(
+        _deriveKey(
+          isClient ? SSHDeriveKeyType.serverKey : SSHDeriveKeyType.clientKey,
+          cipherType.keySize,
+        ),
+        _deriveKey(
+          isClient ? SSHDeriveKeyType.serverIV : SSHDeriveKeyType.clientIV,
+          cipherType.ivSize,
+        ),
+        forEncryption: false,
+      );
 
-    final macType = isClient ? _serverMacType : _clientMacType;
-    if (macType == null) throw StateError('No MAC type selected');
+      final macType = isClient ? _serverMacType : _clientMacType;
+      if (macType == null) throw StateError('No MAC type selected');
 
-    final macKey = _deriveKey(
-      isClient ? SSHDeriveKeyType.serverMacKey : SSHDeriveKeyType.clientMacKey,
-      macType.keySize,
-    );
-    _remoteMac = macType.createMac(macKey);
+      final macKey = _deriveKey(
+        isClient
+            ? SSHDeriveKeyType.serverMacKey
+            : SSHDeriveKeyType.clientMacKey,
+        macType.keySize,
+      );
+      _remoteMac = macType.createMac(macKey);
+    }
   }
 
   Uint8List _deriveKey(SSHDeriveKeyType keyType, int keySize) {
@@ -563,12 +959,12 @@ class SSHTransport {
   }
 
   /// Composes challenge data for host-based authentication according to RFC 4252
-  /// 
+  ///
   /// The signature data MUST be constructed in the exact order specified by RFC 4252:
   /// - session identifier
   /// - SSH_MSG_USERAUTH_REQUEST byte
   /// - user name
-  /// - service name  
+  /// - service name
   /// - "hostbased" method name
   /// - public key algorithm for host key
   /// - public host key and certificates for client host
@@ -619,18 +1015,19 @@ class SSHTransport {
     }
 
     final writer = SSHMessageWriter();
-    
+
     // RFC 4252: Signature data construction in exact order
-    writer.writeString(_sessionId!);                    // session identifier
-    writer.writeUint8(SSH_Message_Userauth_Request.messageId); // SSH_MSG_USERAUTH_REQUEST
-    writer.writeUtf8(username);                         // user name
-    writer.writeUtf8(service);                          // service name
-    writer.writeUtf8('hostbased');                      // method name
-    writer.writeUtf8(publicKeyAlgorithm);               // public key algorithm for host key
-    writer.writeString(publicKey);                      // public host key and certificates
-    writer.writeUtf8(hostName);                         // client host name (FQDN in US-ASCII)
-    writer.writeUtf8(userNameOnClientHost);             // user name on client host (UTF-8)
-    
+    writer.writeString(_sessionId!); // session identifier
+    writer.writeUint8(
+        SSH_Message_Userauth_Request.messageId); // SSH_MSG_USERAUTH_REQUEST
+    writer.writeUtf8(username); // user name
+    writer.writeUtf8(service); // service name
+    writer.writeUtf8('hostbased'); // method name
+    writer.writeUtf8(publicKeyAlgorithm); // public key algorithm for host key
+    writer.writeString(publicKey); // public host key and certificates
+    writer.writeUtf8(hostName); // client host name (FQDN in US-ASCII)
+    writer.writeUtf8(userNameOnClientHost); // user name on client host (UTF-8)
+
     return writer.takeBytes();
   }
 
@@ -980,25 +1377,33 @@ class SSHTransport {
       return;
     }
 
-    final fingerprintHex = fingerprint.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
-    final fingerprintSha256Base64 = base64.encode(fingerprintSha256).replaceAll('=', '');
+    final fingerprintHex =
+        fingerprint.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
+    final fingerprintSha256Base64 =
+        base64.encode(fingerprintSha256).replaceAll('=', '');
 
     // RFC 4251 Section 4.1: Implementations SHOULD try to make best effort to check host keys
     // Log both modern SHA256 (base64) and legacy MD5 (hex with colons) fingerprints.
     printDebug?.call(
         'Server host key fingerprint: SHA256:$fingerprintSha256Base64 (MD5:$fingerprintHex) (${_hostkeyType?.name})');
-    printDebug?.call('WARNING: Verify the server host key fingerprint via a trusted channel before accepting.');
 
-    if (onVerifyHostKey == null) {
-      printDebug?.call('Host key verification handler not provided: rejecting by default');
-    }
+    final verificationFuture = Future.sync(() async {
+      final handler = onVerifyHostKey;
+      if (handler == null) {
+        printDebug?.call(
+            'Host key verification handler not provided: rejecting by default');
+        return false;
+      }
 
-    final userVerified = onVerifyHostKey?.call(_hostkeyType!.name, fingerprint);
+      final result = await handler(_hostkeyType!.name, fingerprint);
+      return result;
+    });
 
-    Future.value(userVerified ?? Future.value(true)).then(
+    verificationFuture.then(
       (verified) {
         if (!verified) {
-          closeWithError(SSHHostkeyError('Hostkey verification failed by user'));
+          closeWithError(
+              SSHHostkeyError('Hostkey verification failed by user'));
         } else {
           _hostkeyVerified = true;
           _sendNewKeys();
@@ -1008,7 +1413,8 @@ class SSHTransport {
       },
       onError: (error, stack) {
         printDebug?.call('Error in host key verification: $error\n$stack');
-        closeWithError(error is SSHError ? error : SSHInternalError(error), stack);
+        closeWithError(
+            error is SSHError ? error : SSHInternalError(error), stack);
       },
     );
   }
@@ -1039,8 +1445,38 @@ class SSHTransport {
   }
 
   /// Returns true if both encryption ciphers are initialized (confidentiality is provided).
-  bool get hasConfidentiality => _encryptCipher != null && _decryptCipher != null;
+  bool get hasConfidentiality {
+    final aeadReadyGcm = _localAeadKey != null && _remoteAeadKey != null;
+    final aeadReadyChaCha = _localChaChaEncKey != null &&
+        _localChaChaLenKey != null &&
+        _remoteChaChaEncKey != null &&
+        _remoteChaChaLenKey != null;
+    return aeadReadyGcm ||
+        aeadReadyChaCha ||
+        (_encryptCipher != null && _decryptCipher != null);
+  }
 
   /// Returns true if both MACs are initialized (MAC protection is provided).
-  bool get hasMacProtection => _localMac != null && _remoteMac != null;
+  bool get hasMacProtection {
+    // AEAD provides authentication as part of the cipher
+    final usingAead = (_clientCipherType?.isAEAD == true) ||
+        (_serverCipherType?.isAEAD == true);
+    if (usingAead) return true;
+    return _localMac != null && _remoteMac != null;
+  }
+
+  /// Compose 12-byte AEAD nonce from 8-byte fixed IV and 32-bit sequence number.
+  Uint8List _composeAeadNonce(Uint8List fixed, int seq) {
+    if (fixed.length < 12) {
+      throw StateError('AEAD fixed nonce must be at least 12 bytes');
+    }
+    final nonce = Uint8List(12);
+    // RFC 5647: Nonce = packet sequence number (BE) || 8-byte IV
+    nonce[0] = (seq >>> 24) & 0xff;
+    nonce[1] = (seq >>> 16) & 0xff;
+    nonce[2] = (seq >>> 8) & 0xff;
+    nonce[3] = (seq) & 0xff;
+    nonce.setRange(4, 12, fixed);
+    return nonce;
+  }
 }
