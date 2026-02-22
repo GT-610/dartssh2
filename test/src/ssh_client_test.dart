@@ -26,6 +26,52 @@ void main() {
     //   client.close();
     // });
 
+    // These are non-standard MAC extensions (hmac-sha2-256-96, hmac-sha2-512-96)
+    // and require server support. Enable once server compatibility is verified.
+    // test('hmacSha256_96 mac works', () async {
+    //   var client = await getHoneypotClient(
+    //     algorithms: SSHAlgorithms(mac: [SSHMacType.hmacSha256_96]),
+    //   );
+    //   await client.authenticated;
+    //   client.close();
+    // });
+
+    // test('hmacSha512_96 mac works', () async {
+    //   var client = await getHoneypotClient(
+    //     algorithms: SSHAlgorithms(mac: [SSHMacType.hmacSha512_96]),
+    //   );
+    //   await client.authenticated;
+    //   client.close();
+    // });
+
+    test('hmacSha256Etm mac works', () async {
+      var client = await getHoneypotClient(
+        algorithms: SSHAlgorithms(
+          mac: [SSHMacType.hmacSha256Etm],
+          cipher: [SSHCipherType.aes256ctr],
+        ),
+      );
+      try {
+        await client.authenticated;
+      } finally {
+        client.close();
+      }
+    });
+
+    test('hmacSha512Etm mac works', () async {
+      var client = await getHoneypotClient(
+        algorithms: SSHAlgorithms(
+          mac: [SSHMacType.hmacSha512Etm],
+          cipher: [SSHCipherType.aes256ctr],
+        ),
+      );
+      try {
+        await client.authenticated;
+      } finally {
+        client.close();
+      }
+    });
+
     test('throws SSHAuthFailError when public key is wrong', () async {
       var client = SSHClient(
         await SSHSocket.connect('test.rebex.net', 22),

@@ -3,8 +3,10 @@ import 'package:dartssh2/src/algorithm/ssh_hostkey_type.dart';
 import 'package:dartssh2/src/algorithm/ssh_kex_type.dart';
 import 'package:dartssh2/src/algorithm/ssh_mac_type.dart';
 
-mixin SSHAlgorithm {
+abstract class SSHAlgorithm {
   String get name;
+
+  const SSHAlgorithm();
 
   // RFC 4251: algorithm identifiers MUST be printable US-ASCII,
   // non-empty strings no longer than 64 characters
@@ -130,8 +132,10 @@ class SSHAlgorithms {
     ],
     // Prefer modern SHA-2 MACs by default; keep SHA-1 as fallback and MD5 last.
     this.mac = const [
-      SSHMacType.hmacSha512,
+      SSHMacType.hmacSha256Etm,
+      SSHMacType.hmacSha512Etm,
       SSHMacType.hmacSha256,
+      SSHMacType.hmacSha512,
       SSHMacType.hmacSha1,
       SSHMacType.hmacMd5,
     ],
